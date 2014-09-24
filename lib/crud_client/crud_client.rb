@@ -5,7 +5,8 @@ require 'faraday_middleware'
 require 'hashie'
 require 'celluloid/io'
 require 'imprint'
-require 'napa'
+require 'napa/version'
+require 'napa/identity'
 
 module CrudClient
   class CrudClient
@@ -55,8 +56,9 @@ module CrudClient
       # use a new celluloid actor thread
       future = Celluloid::Future.new do
         begin
-          logger = defined?(Rails) ? Rails.logger : Napa::Logger.logger
-          logger.info("#{ENV['SERVICE_NAME']} is calling #{self.name}")
+          logger = Rails.logger if defined?(Rails)
+          logger ||= Napa::Logger.logger if defined?(Napa::Logger)
+          logger.info("#{ENV['SERVICE_NAME']} is calling #{self.name}") if logger
           response = conn.send(method, url, options) do |request|
             request.headers = request.headers.merge(headers)
           end
