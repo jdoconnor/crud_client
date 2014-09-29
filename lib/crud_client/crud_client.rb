@@ -53,33 +53,51 @@ module CrudClient
 
       self.trace_id = Imprint::Tracer.get_trace_id.to_s.dup
 
-      # use a new celluloid actor thread
-      future = Celluloid::Future.new do
-        begin
-          logger = Rails.logger if defined?(Rails)
-          logger ||= Napa::Logger.logger if defined?(Napa::Logger)
-          logger.info("#{ENV['SERVICE_NAME']} is calling #{self.name}") if logger
-          response = conn.send(method, url, options) do |request|
-            request.headers = request.headers.merge(headers)
+      begin
+        stream = options.delete(:stream_response)
+        if stream
+          # use excon directly. Do not use a future
+          Excon.send(method, url,
+                     body: options.to_json,
+                     headers: { 'Content-Type' => 'application/json' },
+                     response_block: streaming_response_block(body, &block)
+          )
+        else
+          # use a new celluloid actor thread and wrap the response in a FutureWrapper
+          future = Celluloid::Future.new do
+            logger = Rails.logger if defined?(Rails)
+            logger ||= Napa::Logger.logger if defined?(Napa::Logger)
+            logger.info("#{ENV['SERVICE_NAME']} is calling #{self.name}") if logger
+            response = conn.send(method, url, options) do |request|
+              request.headers = request.headers.merge(headers)
+            end
+            to_return_type response.body
           end
-          to_return_type response.body
-        rescue => e
-          # Throw this to honeybadger with a context of what's going on if it is defined.
-          Honeybadger.notify(e, context: { method: method,
-                                           url: url,
-                                           options: options,
-                                           response_status: response.try(:status),
-                                           response_body: response.try(:body) }) if defined?(Honeybadger)
-          # re-raise the error
-          raise e
+          future.extend(FutureWrapper)
         end
+      rescue => e
+        # Throw this to honeybadger with a context of what's going on if it is defined.
+        Honeybadger.notify(e, context: { method: method,
+                                         url: url,
+                                         options: options,
+                                         streaming: stream,
+                                         response_status: response.try(:status),
+                                         response_body: response.try(:body) }) if defined?(Honeybadger)
+        # re-raise the error
+        raise e
       end
-      future.extend(FutureWrapper)
     end
 
     def self.to_return_type response_body
       # attempt to parse json and mashify it here to catch errors better
       Hashie::Mash.new(JSON.parse(response_body))
+    end
+
+    def self.streaming_response_block(body)
+      lambda do |chunk, remaining, total|
+        body << chunk
+        yield chunk if block_given?
+      end
     end
 
     def self.conn
